@@ -1,0 +1,6 @@
+python-telegram-bot
+pydub
+TTS==0.22.0
+fastapi
+uvicorn
+python-multipart
