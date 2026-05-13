@@ -1,6 +1,5 @@
-python-telegram-bot
-pydub
-TTS==0.22.0
-fastapi
-uvicorn
-python-multipart
+aiogram
+aiogram.filters
+aiogram.types
+uuid
+f5_tts
