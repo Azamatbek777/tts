@@ -1,167 +1,81 @@
-import os
-import logging
 import asyncio
-import subprocess
-from contextlib import asynccontextmanager
-from pathlib import Path
+import os
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import FSInputFile
+import uuid
+from f5_tts import F5TTS
 
-from fastapi import FastAPI
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
-from TTS.api import TTS
-from pydub import AudioSegment
+# ================= SOZLAMALAR =================
+TOKEN = "8034346294:AAE53a_P73UK_oXP15gnBH1hlXiB5hKUZ74"
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-# ---------- Sozlash ----------
-logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = os.getenv("BOT_TOKEN")          # Space'ning Settings → Secrets’da
-# WEBHOOK_URL endi kerak emas!
+# F5-TTS ni yuklash
+print("F5-TTS yuklanmoqda... (birinchi marta biroz vaqt oladi)")
+tts = F5TTS()
 
-VOICE_STORAGE = Path("voice_samples")
-VOICE_STORAGE.mkdir(exist_ok=True)
-user_voice: dict[int, Path] = {}
+USER_VOICES = {}
+os.makedirs("voices", exist_ok=True)
+os.makedirs("output", exist_ok=True)
 
-# ---------- FastAPI hayotiy sikli (polling bilan) ----------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """TTS modelini yuklaymiz va botni polling rejimida ishga tushiramiz."""
-    print("🔄 TTS model yuklanmoqda...")
-    app.state.tts = TTS(
-        model_name="tts_models/multilingual/multi-dataset/your_tts",
-        gpu=False,
-    )
-    print("✅ Model tayyor!")
-
-    # Telegram botni yaratish
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(
-        MessageHandler(filters.AUDIO | filters.VOICE, handle_voice_sample)
-    )
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    await message.answer(
+        "👋 F5-TTS Voice Clone botga xush kelibsiz!\n\n"
+        "1. Ovoz yuboring (5-15 soniya)\n"
+        "2. Matn yozing\n"
+        "Bot sizning ovozingiz bilan o‘qiydi.\n"
+        "Yengil va sifatli!"
     )
 
-    # Botni ishga tushirish (polling)
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    app.state.application = application
+@dp.message(types.ContentType.VOICE)
+async def handle_voice(message: types.Message):
+    user_id = message.from_user.id
+    file = await bot.get_file(message.voice.file_id)
+    
+    path = f"voices/{user_id}_{uuid.uuid4()}.ogg"
+    await bot.download_file(file.file_path, path)
+    
+    wav_path = path.replace(".ogg", ".wav")
+    os.system(f"ffmpeg -i {path} -ar 22050 -ac 1 {wav_path} -y")
+    
+    USER_VOICES[user_id] = wav_path
+    await message.answer("✅ Ovozingiz qabul qilindi! Endi matn yozing.")
 
-    print("🤖 Bot polling rejimida ishlayapti...")
-    yield
-
-    # To‘xtatish
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
-
-app = FastAPI(lifespan=lifespan)
-
-# ---------- Handlerlar (o‘zgarishsiz) ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Assalomu alaykum!\n"
-        "1️⃣ Avval ovozingiz yozilgan MP3 yoki ovozli xabar yuboring.\n"
-        "2️⃣ Keyin men sizga qanday matn o‘qishimni so‘rang."
-    )
-
-async def handle_voice_sample(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Foydalanuvchi yuborgan audio/ovozli xabarni qabul qilib,
-    uni wav formatga o‘tkazamiz va saqlaymiz."""
-    user_id = update.effective_user.id
-
-    if update.message.voice:
-        file = await update.message.voice.get_file()
-    elif update.message.audio:
-        file = await update.message.audio.get_file()
-    else:
+@dp.message()
+async def handle_text(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in USER_VOICES:
+        await message.answer("❌ Avval ovoz yuboring!")
         return
-
-    download_path = VOICE_STORAGE / f"{user_id}_original{Path(file.file_path).suffix}"
-    wav_path = VOICE_STORAGE / f"{user_id}_reference.wav"
-
-    await file.download_to_drive(download_path)
-
-    # ffmpeg bilan 16kHz mono wav ga o‘girish
+    
+    text = message.text.strip()
+    if len(text) < 5:
+        await message.answer("Matn juda qisqa.")
+        return
+    
+    await message.answer("⏳ Audio yaratilmoqda...")
+    
     try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i", str(download_path),
-                "-ar", "16000",
-                "-ac", "1",
-                "-sample_fmt", "s16",
-                str(wav_path),
-            ],
-            check=True,
-            capture_output=True,
+        output_path = f"output/{user_id}_{uuid.uuid4()}.wav"
+        
+        # F5-TTS bilan generatsiya
+        tts.infer(
+            text=text,
+            ref_audio=USER_VOICES[user_id],
+            output_path=output_path
         )
-    except subprocess.CalledProcessError as e:
-        await update.message.reply_text("Faylni qayta ishlashda xatolik yuz berdi.")
-        logging.error(f"ffmpeg error: {e.stderr.decode()}")
-        return
-    finally:
-        download_path.unlink(missing_ok=True)
-
-    # Davomiylikni tekshirish (kamida 2 soniya)
-    try:
-        audio = AudioSegment.from_wav(wav_path)
-        if len(audio) < 2000:
-            await update.message.reply_text(
-                "Ovoz namunasi juda qisqa (kamida 2 soniya). Iltimos, uzunroq ovoz yuboring."
-            )
-            return
+        
+        audio = FSInputFile(output_path)
+        await message.answer_voice(voice=audio)
+        
     except Exception as e:
-        logging.error(f"AudioSegment error: {e}")
-        await update.message.reply_text("Audio faylni tahlil qilib bo‘lmadi.")
-        return
+        await message.answer(f"Xatolik: {str(e)}")
 
-    user_voice[user_id] = wav_path
-    await update.message.reply_text(
-        "✅ Ovoz namunasi saqlandi. Endi menga o‘qishim kerak bo‘lgan matnni yuboring."
-    )
+async def main():
+    print("✅ Bot ishga tushdi (F5-TTS)")
+    await dp.start_polling(bot)
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Matnni saqlangan ovoz namunasi asosida o‘qiydi."""
-    user_id = update.effective_user.id
-    text = update.message.text
-    if not text or len(text) > 500:
-        await update.message.reply_text("Matn juda uzun yoki bo‘sh.")
-        return
-
-    if user_id not in user_voice:
-        await update.message.reply_text(
-            "Iltimos, avval ovoz namunangizni MP3 yoki ovozli xabar ko‘rinishida yuboring."
-        )
-        return
-
-    tts = app.state.tts
-    output_path = VOICE_STORAGE / f"{user_id}_output.wav"
-
-    tts.tts_to_file(
-        text=text,
-        speaker_wav=str(user_voice[user_id]),
-        file_path=str(output_path),
-    )
-
-    with open(output_path, "rb") as voice:
-        await update.message.reply_voice(voice=voice)
-
-    output_path.unlink(missing_ok=True)
-
-
-# Uvicorn ishga tushirish (oddiy)
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    asyncio.run(main())
