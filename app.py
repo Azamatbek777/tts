@@ -1,81 +1,47 @@
-import asyncio
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import FSInputFile
-import uuid
-from f5_tts import F5TTS
+import telebot
+from TTS.api import TTS
 
-# ================= SOZLAMALAR =================
-TOKEN = "8034346294:AAE53a_P73UK_oXP15gnBH1hlXiB5hKUZ74"
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
+# 1. Telegram bot tokenni kiriting
+BOT_TOKEN = "8034346294:AAE53a_P73UK_oXP15gnBH1hlXiB5hKUZ74"
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# F5-TTS ni yuklash
-print("F5-TTS yuklanmoqda... (birinchi marta biroz vaqt oladi)")
-tts = F5TTS()
+# 2. Coqui TTS modelini yuklash (XTTS v2 modeli ko'p tillarni qo'llab-quvvatlaydi)
+print("Coqui TTS modeli yuklanmoqda, kuting...")
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False) 
+print("Model muvaffaqiyatli yuklandi!")
 
-USER_VOICES = {}
-os.makedirs("voices", exist_ok=True)
-os.makedirs("output", exist_ok=True)
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(message, "Salom! Menga istalgan matnni yuboring, men uni ovozli xabarga aylantirib beraman.")
 
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer(
-        "👋 F5-TTS Voice Clone botga xush kelibsiz!\n\n"
-        "1. Ovoz yuboring (5-15 soniya)\n"
-        "2. Matn yozing\n"
-        "Bot sizning ovozingiz bilan o‘qiydi.\n"
-        "Yengil va sifatli!"
-    )
-
-@dp.message(types.ContentType.VOICE)
-async def handle_voice(message: types.Message):
-    user_id = message.from_user.id
-    file = await bot.get_file(message.voice.file_id)
+@bot.message_handler(func=lambda message: True)
+def text_to_voice_message(message):
+    text_input = message.text
+    chat_id = message.chat.id
+    output_audio = f"voice_{chat_id}.wav"
     
-    path = f"voices/{user_id}_{uuid.uuid4()}.ogg"
-    await bot.download_file(file.file_path, path)
-    
-    wav_path = path.replace(".ogg", ".wav")
-    os.system(f"ffmpeg -i {path} -ar 22050 -ac 1 {wav_path} -y")
-    
-    USER_VOICES[user_id] = wav_path
-    await message.answer("✅ Ovozingiz qabul qilindi! Endi matn yozing.")
-
-@dp.message()
-async def handle_text(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in USER_VOICES:
-        await message.answer("❌ Avval ovoz yuboring!")
-        return
-    
-    text = message.text.strip()
-    if len(text) < 5:
-        await message.answer("Matn juda qisqa.")
-        return
-    
-    await message.answer("⏳ Audio yaratilmoqda...")
+    bot.send_chat_action(chat_id, 'record_voice')
     
     try:
-        output_path = f"output/{user_id}_{uuid.uuid4()}.wav"
-        
-        # F5-TTS bilan generatsiya
-        tts.infer(
-            text=text,
-            ref_audio=USER_VOICES[user_id],
-            output_path=output_path
+        # Matnni ovozga aylantirish (Siz o'zbek tili uchun 'uz' yoki ingliz tili uchun 'en' qilishingiz mumkin)
+        # speaker_wav parametri uchun kompyuteringizdagi qisqa 10 soniyali ovoz namunasini ko'rsatsangiz, o'sha ovozda gapiradi.
+        tts.tts_to_file(
+            text=text_input, 
+            file_path=output_audio,
+            speaker_wav="sample.wav", # Agar o'z ovozingizni klonlamoqchi bo'lsangiz, shu faylni tayyorlang
+            language="uz"
         )
         
-        audio = FSInputFile(output_path)
-        await message.answer_voice(voice=audio)
+        # Ovozli xabarni Telegram'ga yuborish
+        with open(output_audio, 'rb') as voice:
+            bot.send_voice(chat_id, voice)
+            
+        # Vaqtinchalik faylni o'chirish
+        os.remove(output_audio)
         
     except Exception as e:
-        await message.answer(f"Xatolik: {str(e)}")
+        bot.reply_to(message, f"Xatolik yuz berdi: {str(e)}")
 
-async def main():
-    print("✅ Bot ishga tushdi (F5-TTS)")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# Botni uzluksiz ishga tushirish
+bot.polling(none_stop=True)
