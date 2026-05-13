@@ -1,2 +1,4 @@
-TTS.api
-telebot
+pyTelegramBotAPI
+pydub
+coqui-tts
+transformers==5.0.0
